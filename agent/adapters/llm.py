@@ -37,13 +37,24 @@ FALLBACK_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
 def _safe_parse(raw_text: str) -> dict:
     """Parses JSON, auto-repairing small mistakes (stray commas,
-    unescaped quotes, minor truncation) before giving up."""
+    unescaped quotes, minor truncation) before giving up. Some smaller
+    fallback models occasionally wrap the object in a list (e.g. [{...}])
+    even when told not to -- if that happens and there's exactly one
+    dict inside, unwrap it automatically instead of crashing downstream."""
     try:
-        return json.loads(raw_text)
+        parsed = json.loads(raw_text)
     except json.JSONDecodeError:
         repaired = repair_json(raw_text)
-        return json.loads(repaired)
+        parsed = json.loads(repaired)
 
+    if isinstance(parsed, list):
+        if len(parsed) == 1 and isinstance(parsed[0], dict):
+            return parsed[0]
+        raise ValueError(
+            f"Expected a JSON object but got a list with {len(parsed)} items: {parsed}"
+        )
+
+    return parsed
 
 def _call_gemini(system_instruction: str, user_prompt: str, temperature: float) -> dict:
     response = _gemini_client.models.generate_content(
@@ -64,7 +75,7 @@ def _call_openrouter_fallback(system_instruction: str, user_prompt: str, tempera
         temperature=temperature,
         max_tokens=4000,
         messages=[
-            {"role": "system", "content": system_instruction + "\n\nOutput ONLY raw JSON, no markdown fences, no extra text."},
+           {"role": "system", "content": system_instruction + "\n\nOutput ONLY a single raw JSON object, not an array, no markdown fences, no extra text."},
             {"role": "user", "content": user_prompt},
         ],
     )

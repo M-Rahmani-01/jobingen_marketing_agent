@@ -41,14 +41,13 @@ Output strict JSON only, matching this exact shape:
   "cta": "the specific call to action line",
   "alt_text": "a clear description of what the visual should show"
 }"""
-
-
 def run_copywriter(
-    theme: Theme,
-    tension: str,
-    angle: Angle,
-    briefs: dict[str, PlatformBrief],
-) -> dict[str, PostDraft]:
+        theme: Theme,
+        tension: str,
+        angle: Angle,
+        briefs: dict[str, PlatformBrief],
+        feedback: dict[str, str] | None = None,
+    ) -> dict[str, PostDraft]:
     """
     Writes one PostDraft per platform, using that platform's brief plus
     the shared angle, tension, and real audience language from the
@@ -62,18 +61,25 @@ def run_copywriter(
 
     for platform, brief in briefs.items():
         user_prompt = (
-            f"Platform: {platform}\n"
-            f"Brief -- format: {brief.format}\n"
-            f"Brief -- hook_style: {brief.hook_style}\n"
-            f"Brief -- caption_length: {brief.caption_length}\n"
-            f"Brief -- cta_type: {brief.cta_type}\n"
-            f"Brief -- tone: {brief.tone}\n\n"
-            f"Angle (the take): {angle.take}\n"
-            f"Product tie-in: {angle.product_tie or 'none'}\n"
-            f"Audience tension: {tension}\n"
-            f"Real audience language (paraphrased, for flavor only -- "
-            f"never copy verbatim): {evidence_snippets}\n\n"
-            "Write the full post for this platform, following the brief exactly."
+        f"Platform: {platform}\n"
+        f"Brief -- format: {brief.format}\n"
+        f"Brief -- hook_style: {brief.hook_style}\n"
+        f"Brief -- caption_length: {brief.caption_length}\n"
+        f"Brief -- cta_type: {brief.cta_type}\n"
+        f"Brief -- tone: {brief.tone}\n\n"
+        f"Angle (the take): {angle.take}\n"
+        f"Product tie-in: {angle.product_tie or 'none'}\n"
+        f"Audience tension: {tension}\n"
+        f"Real audience language (paraphrased, for flavor only -- "
+        f"never copy verbatim): {evidence_snippets}\n\n"
+        "Write the full post for this platform, following the brief exactly."
+    )
+ 
+    if feedback and platform in feedback:
+        user_prompt += (
+            f"\n\nIMPORTANT: a previous draft for this platform failed "
+            f"editorial review. Specific feedback to fix: {feedback[platform]}\n"
+            f"Rewrite to directly address this feedback."
         )
 
         result = generate_json(

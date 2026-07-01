@@ -63,7 +63,11 @@ If you cannot find an angle that passes all 5 filter checks, set
 "passes_filter": false and explain why in "why_only_jobingen"."""
 
 
-def run_angle_selector(theme: Theme, tension: str) -> Angle | None:
+def run_angle_selector(
+        theme: Theme,
+        tension: str,
+        feedback: str | None = None,
+    ) -> Angle | None:
     """
     Returns an Angle if it passes the differentiation filter, or None
     if nothing credible was found (a valid outcome — better to skip a
@@ -74,6 +78,14 @@ def run_angle_selector(theme: Theme, tension: str) -> Angle | None:
         f"Audience tension: {tension}\n\n"
         "Find the differentiated JobInGen angle on this."
     )
+ 
+    if feedback:
+        user_prompt += (
+            f"\n\nIMPORTANT: a previous attempt on this same theme failed "
+            f"brand+safety review. Specific feedback to address: {feedback}\n"
+            f"Produce a genuinely different angle that fixes this issue -- "
+            f"do not just reword the same idea."
+        )
 
     result = generate_json(
         system_instruction=SYSTEM_INSTRUCTION,
