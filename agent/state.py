@@ -148,5 +148,4 @@ class MarketingState(BaseModel):
     approved: Optional[bool] = None
     errors: list[str] = Field(default_factory=list)
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = {"arbitrary_types_allowed": True}
