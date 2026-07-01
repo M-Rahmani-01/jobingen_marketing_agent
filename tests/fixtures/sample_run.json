@@ -1,0 +1,60 @@
+{
+  "theme": {
+    "label": "Application & Resume Effectiveness",
+    "evidence": [
+      {
+        "source": "reddit",
+        "text": "Applied to 200+ jobs this month, got 3 responses, all rejections. Starting to think my resume is the problem but I have no idea what's wrong with it.",
+        "score": 0.85,
+        "url": "https://reddit.com/r/developersIndia/example1",
+        "timestamp": "2026-06-28T10:15:00Z"
+      },
+      {
+        "source": "reddit",
+        "text": "Tailoring my resume for every single job posting is exhausting. Anyone found a way to speed this up without it looking generic?",
+        "score": 0.67,
+        "url": "https://reddit.com/r/cscareerquestions/example6",
+        "timestamp": "2026-06-26T16:00:00Z"
+      },
+      {
+        "source": "reddit",
+        "text": "Does anyone actually read cover letters or am I wasting hours writing something that goes straight to the trash?",
+        "score": 0.58,
+        "url": "https://reddit.com/r/developersIndia/example11",
+        "timestamp": "2026-06-23T09:40:00Z"
+      },
+      {
+        "source": "reddit",
+        "text": "Applied through a portal, got an automated rejection 4 minutes later. There is no way a human even looked at my resume.",
+        "score": 0.76,
+        "url": "https://reddit.com/r/jobs/example13",
+        "timestamp": "2026-06-26T11:05:00Z"
+      }
+    ],
+    "heat": 0.75
+  },
+  "tension": "The gnawing fear that every hour spent tailoring resumes and writing cover letters vanishes unseen, leaving you feeling pointless and questioning whether your efforts will ever be noticed.",
+  "angle": {
+    "take": "That sinking feeling when you spend an hour tweaking your resume, hit 'apply,' and wonder if it even moved the needle? It's not about *more* tailoring, it's about *precise* tailoring. Our AI ensures every adjustment you make is directly aligned with *that specific job description*, so your effort actually counts.",
+    "product_tie": "AI resume builder that tailors your resume to each specific job description",
+    "why_only_jobingen": "Generic advice tells you to 'tailor your resume'; JobInGen provides the AI tool that precisely executes and validates that tailoring for *each specific job*, removing the guesswork and ensuring your effort is directly impactful, not just hopeful."
+  },
+  "briefs": {
+    "linkedin": {
+      "platform": "linkedin",
+      "format": "text post (or single\u2011page carousel) \u2013 insight\u2011dense",
+      "hook_style": "contrarian insight with a number: e.g., 'Most resume tweaks are wasted effort \u2013 here\u2019s the 20% that actually moves the needle.'",
+      "caption_length": "long mini\u2011essay (150\u2011250 words) if it earns it",
+      "cta_type": "comment / repost / follow for more",
+      "tone": "aspirational, professional, slightly anxious"
+    },
+    "instagram": {
+      "platform": "instagram",
+      "format": "single bold graphic or carousel \u2013 emotionally led visual",
+      "hook_style": "image shows a frustrated job seeker vs. a confident one with a check\u2011mark, visual metaphor of precision",
+      "caption_length": "short, punchy, front\u2011loaded (under 2 lines)",
+      "cta_type": "save this / send to a friend job\u2011hunting",
+      "tone": "casual, inspiring, entertaining"
+    }
+  }
+}
