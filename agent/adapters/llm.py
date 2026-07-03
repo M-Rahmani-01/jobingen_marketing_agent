@@ -5,18 +5,20 @@ The ONE place that talks to the LLM provider(s). Every node calls
 generate_json() instead of importing an SDK directly.
 
 Primary: Google Gemini (free tier, daily quota).
-Fallback: OpenRouter's free Nemotron model, used automatically if
-Gemini's quota is exhausted or the call otherwise fails.
+Fallback: OpenRouter's "openrouter/free" auto-router -- instead of
+hardcoding one specific free model (which can get overloaded by OTHER
+users, as happened today with Nemotron), this automatically picks
+whichever free model currently has capacity. More resilient than
+pinning to a single model ID.
 
-The fallback model doesn't have Gemini's native "force valid JSON" mode,
-so on larger outputs (like Copywriter's) it can occasionally produce
-almost-valid JSON (a stray comma, an unescaped quote). We run everything
-through json_repair before parsing to fix small mistakes automatically
-instead of crashing the whole node.
+Also retries once with a short wait on TRANSIENT errors (503/502 "high
+demand, try again") before giving up on a provider -- these often
+resolve themselves within a few seconds.
 """
 
 import os
 import json
+import time
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -32,15 +34,15 @@ _openrouter_client = OpenAI(
 )
 
 GEMINI_MODEL = "gemini-2.5-flash"
-FALLBACK_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+FALLBACK_MODEL = "openrouter/free"  # auto-picks whichever free model has capacity right now
+
+TRANSIENT_RETRY_WAIT_SECONDS = 5
 
 
 def _safe_parse(raw_text: str) -> dict:
-    """Parses JSON, auto-repairing small mistakes (stray commas,
-    unescaped quotes, minor truncation) before giving up. Some smaller
-    fallback models occasionally wrap the object in a list (e.g. [{...}])
-    even when told not to -- if that happens and there's exactly one
-    dict inside, unwrap it automatically instead of crashing downstream."""
+    """Parses JSON, auto-repairing small mistakes before giving up.
+    Also unwraps a single-item list, since some fallback models wrap
+    the object in [...] even when told not to."""
     try:
         parsed = json.loads(raw_text)
     except json.JSONDecodeError:
@@ -50,11 +52,19 @@ def _safe_parse(raw_text: str) -> dict:
     if isinstance(parsed, list):
         if len(parsed) == 1 and isinstance(parsed[0], dict):
             return parsed[0]
-        raise ValueError(
-            f"Expected a JSON object but got a list with {len(parsed)} items: {parsed}"
-        )
+        raise ValueError(f"Expected a JSON object but got a list: {parsed}")
 
     return parsed
+
+
+def _is_transient_error(error: Exception) -> bool:
+    """503/502/'UNAVAILABLE'/'high demand'/'ResourceExhausted' errors are
+    usually temporary and worth one quick retry before giving up."""
+    msg = str(error).lower()
+    return any(term in msg for term in [
+        "503", "502", "unavailable", "high demand", "resourceexhausted", "overloaded"
+    ])
+
 
 def _call_gemini(system_instruction: str, user_prompt: str, temperature: float) -> dict:
     response = _gemini_client.models.generate_content(
@@ -75,15 +85,15 @@ def _call_openrouter_fallback(system_instruction: str, user_prompt: str, tempera
         temperature=temperature,
         max_tokens=4000,
         messages=[
-           {"role": "system", "content": system_instruction + "\n\nOutput ONLY a single raw JSON object, not an array, no markdown fences, no extra text."},
+            {"role": "system", "content": system_instruction + "\n\nOutput ONLY a single raw JSON object, not an array, no markdown fences, no extra text."},
             {"role": "user", "content": user_prompt},
         ],
     )
 
     if not response.choices:
         raise RuntimeError(
-            f"OpenRouter returned no choices (likely rate-limited or the "
-            f"free model is temporarily overloaded). Raw response: {response}"
+            f"OpenRouter returned no choices (likely rate-limited or overloaded). "
+            f"Raw response: {response}"
         )
 
     raw = response.choices[0].message.content
@@ -93,22 +103,37 @@ def _call_openrouter_fallback(system_instruction: str, user_prompt: str, tempera
     return _safe_parse(raw)
 
 
+def _call_with_transient_retry(call_fn, *args) -> dict:
+    """Tries call_fn(*args) once. If it fails with a TRANSIENT error,
+    waits a few seconds and tries exactly once more before giving up."""
+    try:
+        return call_fn(*args)
+    except Exception as first_error:
+        if _is_transient_error(first_error):
+            print(f"[llm.py] Transient error ({first_error}) -- "
+                  f"waiting {TRANSIENT_RETRY_WAIT_SECONDS}s and retrying once...")
+            time.sleep(TRANSIENT_RETRY_WAIT_SECONDS)
+            return call_fn(*args)  # if this also fails, let it raise normally
+        raise
+
+
 def generate_json(
     system_instruction: str,
     user_prompt: str,
     temperature: float = 0.7,
 ) -> dict:
     """
-    Tries Gemini first. If that fails for ANY reason (quota exhausted,
-    network error, bad JSON), automatically falls back to OpenRouter's
-    free Nemotron model. Only raises if BOTH fail.
+    Tries Gemini first (with one transient-error retry). If that still
+    fails for ANY reason, automatically falls back to OpenRouter's free
+    auto-router (also with one transient-error retry). Only raises if
+    BOTH fully fail.
     """
     try:
-        return _call_gemini(system_instruction, user_prompt, temperature)
+        return _call_with_transient_retry(_call_gemini, system_instruction, user_prompt, temperature)
     except Exception as gemini_error:
         print(f"[llm.py] Gemini failed ({gemini_error}) — falling back to OpenRouter...")
         try:
-            return _call_openrouter_fallback(system_instruction, user_prompt, temperature)
+            return _call_with_transient_retry(_call_openrouter_fallback, system_instruction, user_prompt, temperature)
         except Exception as fallback_error:
             raise RuntimeError(
                 f"[llm.py] Both providers failed.\n"
