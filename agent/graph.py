@@ -1,24 +1,25 @@
 """
 agent/graph.py
 
-LangGraph wiring for the pipeline -- Version 1: HAPPY PATH ONLY.
+LangGraph wiring -- Version 2: HAPPY PATH + RETRY LOOP.
 
-This intentionally does NOT include retry logic yet. Goal right now is
-just to confirm LangGraph can correctly call our existing node functions
-in sequence, using MarketingState as the shared state object, and
-correctly stop early when chosen_theme or angle come back None (the
-"no post today" outcomes we built in Weeks 1-2).
+Builds on the proven Version 1 wiring (Scout -> ... -> Critics, with
+early exits for "no strong theme" / "no differentiated angle"). This
+version adds the layer-routed retry logic that used to live in
+orchestrator.py's manual while-loop, now expressed as real graph edges:
 
-Retry routing (the orchestrator.py logic) gets added in graph_v2 once
-this base version is confirmed working.
+  brand+safety failure  -> retry angle_selector (full re-pick, loops
+                            back through platform_strategist + copywriter)
+  platform-fit failure  -> retry copywriter (only the failing platforms),
+                            then re-check with critics
+  either failure > MAX_RETRIES -> stop cleanly, log the reason
+  everything passes     -> success, END
 
-IMPORTANT: none of our existing node functions take MarketingState
-directly -- they take individual typed arguments (Theme, str, etc.) and
-return typed objects, exactly as we built them in Weeks 1-3. So each
-LangGraph node here is a small WRAPPER: it pulls what it needs off
-state, calls our real function unchanged, and returns a dict of the
-fields that changed. This is the standard LangGraph pattern -- your
-actual thinking logic never has to know LangGraph exists.
+SIMPLIFICATION vs orchestrator.py: after a copywriter retry, this
+version re-critiques BOTH platforms, not just the fixed one. Slightly
+more API calls per retry, but much simpler to reason about correctly
+within LangGraph's cycle structure. Can optimize later (see
+PROGRESS.md "Ideas for Later").
 """
 
 from langgraph.graph import StateGraph, START, END
@@ -33,9 +34,11 @@ from agent.nodes.platform_strategist import run_platform_strategist
 from agent.nodes.copywriter import run_copywriter
 from agent.nodes.critics import run_critics
 
+MAX_RETRIES = 3
+
 
 # ─────────────────────────────────────────────
-# NODE WRAPPERS — each one: read state -> call real function -> return updates
+# NODE WRAPPERS — happy path (unchanged from v1, already proven working)
 # ─────────────────────────────────────────────
 
 def node_trend_scout(state: MarketingState) -> dict:
@@ -79,7 +82,72 @@ def node_critics(state: MarketingState) -> dict:
 
 
 # ─────────────────────────────────────────────
-# CONDITIONAL ROUTING — the "no strong theme" / "no angle" early exits
+# HELPERS — shared by the retry node and the router (kept in sync by
+# living in ONE place instead of being duplicated)
+# ─────────────────────────────────────────────
+
+def _brand_safety_failures(critiques: dict) -> list:
+    return [c for key, c in critiques.items() if key.endswith("_brand_safety") and not c.passed]
+
+
+def _platform_fit_failures(critiques: dict) -> dict:
+    return {
+        key.replace("_platform_fit", ""): c
+        for key, c in critiques.items()
+        if key.endswith("_platform_fit") and not c.passed
+    }
+
+
+# ─────────────────────────────────────────────
+# RETRY NODES — NEW in v2
+# ─────────────────────────────────────────────
+
+def node_record_critique_outcome(state: MarketingState) -> dict:
+    """Updates retry_counts based on what just failed. Must be a real
+    node (not just a router) because only nodes can update state."""
+    retry_counts = dict(state.retry_counts)
+
+    if _brand_safety_failures(state.critiques):
+        retry_counts["angle_selector"] = retry_counts.get("angle_selector", 0) + 1
+    elif _platform_fit_failures(state.critiques):
+        retry_counts["copywriter"] = retry_counts.get("copywriter", 0) + 1
+
+    return {"retry_counts": retry_counts}
+
+
+def node_retry_angle_selector(state: MarketingState) -> dict:
+    feedback = " | ".join(c.feedback for c in _brand_safety_failures(state.critiques))
+    print(f"[graph] Retrying angle_selector (attempt {state.retry_counts.get('angle_selector', 0)}/{MAX_RETRIES})")
+    angle = run_angle_selector(state.chosen_theme, state.tension, feedback=feedback)
+    return {"angle": angle}
+
+
+def node_retry_copywriter(state: MarketingState) -> dict:
+    failures = _platform_fit_failures(state.critiques)
+    feedback = {platform: c.feedback for platform, c in failures.items()}
+    failing_briefs = {platform: state.briefs[platform] for platform in failures}
+
+    print(f"[graph] Retrying copywriter for {list(failures.keys())} "
+          f"(attempt {state.retry_counts.get('copywriter', 0)}/{MAX_RETRIES})")
+
+    fixed_drafts = run_copywriter(state.chosen_theme, state.tension, state.angle, failing_briefs, feedback=feedback)
+
+    merged_drafts = dict(state.drafts)
+    merged_drafts.update(fixed_drafts)
+    return {"drafts": merged_drafts}
+
+
+def node_fail_max_retries(state: MarketingState) -> dict:
+    reason = (
+        f"Failed after max retries. retry_counts={state.retry_counts}, "
+        f"last critiques={ {k: v.passed for k, v in state.critiques.items()} }"
+    )
+    print(f"[graph] {reason}")
+    return {"errors": state.errors + [reason]}
+
+
+# ─────────────────────────────────────────────
+# CONDITIONAL ROUTING
 # ─────────────────────────────────────────────
 
 def route_after_scorer(state: MarketingState) -> str:
@@ -96,6 +164,23 @@ def route_after_angle(state: MarketingState) -> str:
     return "continue"
 
 
+def route_after_critique_outcome(state: MarketingState) -> str:
+    brand_fail = _brand_safety_failures(state.critiques)
+    platform_fail = _platform_fit_failures(state.critiques)
+
+    if brand_fail:
+        if state.retry_counts.get("angle_selector", 0) > MAX_RETRIES:
+            return "fail"
+        return "retry_angle"
+
+    if platform_fail:
+        if state.retry_counts.get("copywriter", 0) > MAX_RETRIES:
+            return "fail"
+        return "retry_copy"
+
+    return "success"
+
+
 # ─────────────────────────────────────────────
 # BUILD THE GRAPH
 # ─────────────────────────────────────────────
@@ -103,6 +188,7 @@ def route_after_angle(state: MarketingState) -> str:
 def build_graph():
     builder = StateGraph(MarketingState)
 
+    # Happy path nodes
     builder.add_node("trend_scout", node_trend_scout)
     builder.add_node("signal_synthesizer", node_signal_synthesizer)
     builder.add_node("trend_scorer", node_trend_scorer)
@@ -112,27 +198,48 @@ def build_graph():
     builder.add_node("copywriter", node_copywriter)
     builder.add_node("critics", node_critics)
 
+    # Retry nodes
+    builder.add_node("record_critique_outcome", node_record_critique_outcome)
+    builder.add_node("retry_angle_selector", node_retry_angle_selector)
+    builder.add_node("retry_copywriter", node_retry_copywriter)
+    builder.add_node("fail_max_retries", node_fail_max_retries)
+
+    # Happy path edges
     builder.add_edge(START, "trend_scout")
     builder.add_edge("trend_scout", "signal_synthesizer")
     builder.add_edge("signal_synthesizer", "trend_scorer")
 
     builder.add_conditional_edges(
-        "trend_scorer",
-        route_after_scorer,
+        "trend_scorer", route_after_scorer,
         {"end": END, "continue": "audience_modeler"},
     )
 
     builder.add_edge("audience_modeler", "angle_selector")
 
     builder.add_conditional_edges(
-        "angle_selector",
-        route_after_angle,
+        "angle_selector", route_after_angle,
         {"end": END, "continue": "platform_strategist"},
     )
 
     builder.add_edge("platform_strategist", "copywriter")
     builder.add_edge("copywriter", "critics")
-    builder.add_edge("critics", END)
+    builder.add_edge("critics", "record_critique_outcome")
+
+    # Retry routing — the new part
+    builder.add_conditional_edges(
+        "record_critique_outcome", route_after_critique_outcome,
+        {
+            "retry_angle": "retry_angle_selector",
+            "retry_copy": "retry_copywriter",
+            "fail": "fail_max_retries",
+            "success": END,
+        },
+    )
+
+    # Loop-back edges — these create the cycles
+    builder.add_edge("retry_angle_selector", "platform_strategist")  # full redo
+    builder.add_edge("retry_copywriter", "critics")                  # recheck
+    builder.add_edge("fail_max_retries", END)
 
     return builder.compile()
 
@@ -148,6 +255,9 @@ if __name__ == "__main__":
     if final_state.get("angle"):
         print(f"Angle: {final_state['angle'].take}")
     if final_state.get("critiques"):
-        print("\nCritique summary:")
+        print("\nFinal critique summary:")
         for key, c in final_state["critiques"].items():
             print(f"  {key}: {'PASS' if c.passed else 'FAIL'} ({c.score})")
+    print(f"\nRetry counts: {final_state.get('retry_counts')}")
+    if final_state.get("errors"):
+        print(f"Errors: {final_state['errors']}")
