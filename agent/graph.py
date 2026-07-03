@@ -23,6 +23,7 @@ PROGRESS.md "Ideas for Later").
 """
 
 from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from agent.state import MarketingState
 from agent.nodes.trend_scout import run_trend_scout
@@ -185,7 +186,14 @@ def route_after_critique_outcome(state: MarketingState) -> str:
 # BUILD THE GRAPH
 # ─────────────────────────────────────────────
 
-def build_graph():
+def build_graph(checkpointer=None):
+    """
+    checkpointer=None -> no persistence, same as before (used by our
+    mock tests, since they don't need a real DB file).
+    checkpointer=<SqliteSaver instance> -> every step of the run gets
+    saved to disk, so a run can be paused, resumed, or inspected later
+    even after the program exits or crashes mid-run.
+    """
     builder = StateGraph(MarketingState)
 
     # Happy path nodes
@@ -241,23 +249,42 @@ def build_graph():
     builder.add_edge("retry_copywriter", "critics")                  # recheck
     builder.add_edge("fail_max_retries", END)
 
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
 # Quick manual test — run this file directly
+#
+# Uses a REAL SQLite checkpointer this time, saved to
+# content_store/checkpoints.sqlite (per FOLDER_STRUCTURE.md). Every step
+# of the run gets persisted under a "thread_id" -- think of a thread_id
+# as a save-slot name. Run this file twice with the SAME thread_id and
+# LangGraph can resume/inspect that exact run instead of starting fresh.
 if __name__ == "__main__":
-    graph = build_graph()
-    final_state = graph.invoke(MarketingState())
+    import os
 
-    print("\n--- GRAPH RUN COMPLETE ---")
-    if final_state.get("chosen_theme"):
-        print(f"Theme: {final_state['chosen_theme'].label}")
-    if final_state.get("angle"):
-        print(f"Angle: {final_state['angle'].take}")
-    if final_state.get("critiques"):
-        print("\nFinal critique summary:")
-        for key, c in final_state["critiques"].items():
-            print(f"  {key}: {'PASS' if c.passed else 'FAIL'} ({c.score})")
-    print(f"\nRetry counts: {final_state.get('retry_counts')}")
-    if final_state.get("errors"):
-        print(f"Errors: {final_state['errors']}")
+    os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")  # security: only allow known-safe types on checkpoint load
+
+    db_path = "content_store/checkpoints.sqlite"
+    thread_id = "manual-test-run-1"
+
+    with SqliteSaver.from_conn_string(db_path) as checkpointer:
+        graph = build_graph(checkpointer=checkpointer)
+        config = {"configurable": {"thread_id": thread_id}}
+
+        final_state = graph.invoke(MarketingState(), config=config)
+
+        print("\n--- GRAPH RUN COMPLETE ---")
+        if final_state.get("chosen_theme"):
+            print(f"Theme: {final_state['chosen_theme'].label}")
+        if final_state.get("angle"):
+            print(f"Angle: {final_state['angle'].take}")
+        if final_state.get("critiques"):
+            print("\nFinal critique summary:")
+            for key, c in final_state["critiques"].items():
+                print(f"  {key}: {'PASS' if c.passed else 'FAIL'} ({c.score})")
+        print(f"\nRetry counts: {final_state.get('retry_counts')}")
+        if final_state.get("errors"):
+            print(f"Errors: {final_state['errors']}")
+
+        print(f"\n[checkpointer] Run saved under thread_id='{thread_id}' at {db_path}")
+        print("[checkpointer] Re-run this file to see the checkpoint history grow.")
