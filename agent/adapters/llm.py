@@ -121,25 +121,36 @@ def generate_json(
     system_instruction: str,
     user_prompt: str,
     temperature: float = 0.7,
+    openrouter_max_attempts: int = 3,
 ) -> dict:
     """
     Tries Gemini first (with one transient-error retry). If that still
-    fails for ANY reason, automatically falls back to OpenRouter's free
-    auto-router (also with one transient-error retry). Only raises if
-    BOTH fully fail.
+    fails for ANY reason, falls back to OpenRouter's free auto-router --
+    retried up to openrouter_max_attempts times, since "openrouter/free"
+    can land on a DIFFERENT underlying model each call, so a failure
+    (bad JSON, empty response) is often worth just trying again rather
+    than giving up immediately. Only raises if Gemini AND every
+    OpenRouter attempt fail.
     """
     try:
         return _call_with_transient_retry(_call_gemini, system_instruction, user_prompt, temperature)
     except Exception as gemini_error:
         print(f"[llm.py] Gemini failed ({gemini_error}) — falling back to OpenRouter...")
-        try:
-            return _call_with_transient_retry(_call_openrouter_fallback, system_instruction, user_prompt, temperature)
-        except Exception as fallback_error:
-            raise RuntimeError(
-                f"[llm.py] Both providers failed.\n"
-                f"Gemini error: {gemini_error}\n"
-                f"OpenRouter error: {fallback_error}"
-            )
+
+        last_fallback_error = None
+        for attempt in range(1, openrouter_max_attempts + 1):
+            try:
+                return _call_openrouter_fallback(system_instruction, user_prompt, temperature)
+            except Exception as fallback_error:
+                last_fallback_error = fallback_error
+                print(f"[llm.py] OpenRouter attempt {attempt}/{openrouter_max_attempts} "
+                      f"failed ({fallback_error}) — {'retrying...' if attempt < openrouter_max_attempts else 'giving up.'}")
+
+        raise RuntimeError(
+            f"[llm.py] Both providers failed.\n"
+            f"Gemini error: {gemini_error}\n"
+            f"OpenRouter error (after {openrouter_max_attempts} attempts): {last_fallback_error}"
+        )
 
 
 # Quick manual test — run this file directly
