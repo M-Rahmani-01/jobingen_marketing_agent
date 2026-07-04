@@ -9,6 +9,8 @@ Zero API calls, fully deterministic.
 
 from unittest.mock import patch
 
+from langgraph.checkpoint.memory import InMemorySaver
+
 from agent.state import MarketingState, SignalItem, Theme, Angle, PlatformBrief, PostDraft, Critique
 from agent.graph import build_graph, MAX_RETRIES
 
@@ -80,17 +82,18 @@ def test_platform_fit_failure_loops_through_retry_copywriter_and_succeeds():
             },
         ]
 
-        graph = build_graph()
-        final_state = graph.invoke(MarketingState())
+        graph = build_graph(checkpointer=InMemorySaver())
+        final_state = graph.invoke(MarketingState(), config={"configurable": {"thread_id": "test-platform-fit-retry"}})
 
         assert final_state["retry_counts"]["copywriter"] == 1
         assert final_state["retry_counts"].get("angle_selector", 0) == 0
         assert final_state["drafts"]["instagram"].hook_options[0] == "strong"
         assert not final_state["errors"]  # no failure logged -- success
+        assert "__interrupt__" in final_state  # paused for human approval, as it should
         assert mock_copywriter.call_count == 2
         assert mock_critics.call_count == 2
 
-    print("PASS: platform-fit failure looped through retry_copywriter and succeeded.")
+    print("PASS: platform-fit failure looped through retry_copywriter, succeeded, and paused for approval.")
 
 
 def test_brand_safety_failure_loops_through_retry_angle_and_succeeds():
@@ -124,15 +127,16 @@ def test_brand_safety_failure_loops_through_retry_angle_and_succeeds():
             {"linkedin_platform_fit": pass_all, "linkedin_brand_safety": pass_all},
         ]
 
-        graph = build_graph()
-        final_state = graph.invoke(MarketingState())
+        graph = build_graph(checkpointer=InMemorySaver())
+        final_state = graph.invoke(MarketingState(), config={"configurable": {"thread_id": "test-brand-safety-retry"}})
 
         assert final_state["retry_counts"]["angle_selector"] == 1
         assert final_state["angle"].take == "sharp take"
         assert not final_state["errors"]
+        assert "__interrupt__" in final_state  # paused for human approval, as it should
         assert mock_angle.call_count == 2
 
-    print("PASS: brand+safety failure looped through retry_angle_selector and succeeded.")
+    print("PASS: brand+safety failure looped through retry_angle_selector, succeeded, and paused for approval.")
 
 
 def test_persistent_failure_stops_at_max_retries_and_logs_error():
@@ -159,7 +163,7 @@ def test_persistent_failure_stops_at_max_retries_and_logs_error():
             "linkedin_brand_safety": always_pass_brand,
         }
 
-        graph = build_graph()
+        graph = build_graph()  # no checkpointer needed for these mock tests
         final_state = graph.invoke(MarketingState())
 
         assert final_state["retry_counts"]["copywriter"] == MAX_RETRIES + 1

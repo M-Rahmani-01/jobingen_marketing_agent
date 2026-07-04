@@ -24,6 +24,7 @@ PROGRESS.md "Ideas for Later").
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import interrupt
 
 from agent.state import MarketingState
 from agent.nodes.trend_scout import run_trend_scout
@@ -147,6 +148,31 @@ def node_fail_max_retries(state: MarketingState) -> dict:
     return {"errors": state.errors + [reason]}
 
 
+def node_human_approval(state: MarketingState) -> dict:
+    """
+    The non-negotiable guardrail (Spec: human approval before every
+    post, no exceptions). This node PAUSES the entire graph execution
+    -- interrupt() stops everything right here and hands control back
+    to whatever is running the graph (right now: our manual test block;
+    later: the Week 6 Streamlit dashboard).
+
+    The graph will not proceed past this point until someone resumes it
+    with a decision. Nothing gets "approved" by default -- silence
+    means the run just stays paused.
+    """
+    decision = interrupt({
+        "message": "Review this content pack and approve or reject.",
+        "theme": state.chosen_theme.label if state.chosen_theme else None,
+        "angle": state.angle.take if state.angle else None,
+        "drafts": {p: d.model_dump() for p, d in state.drafts.items()},
+        "critiques": {k: v.model_dump() for k, v in state.critiques.items()},
+    })
+
+    approved = decision.get("approved", False) if isinstance(decision, dict) else False
+    print(f"[graph] Human decision received: {'APPROVED' if approved else 'REJECTED'}")
+    return {"approved": approved}
+
+
 # ─────────────────────────────────────────────
 # CONDITIONAL ROUTING
 # ─────────────────────────────────────────────
@@ -211,6 +237,7 @@ def build_graph(checkpointer=None):
     builder.add_node("retry_angle_selector", node_retry_angle_selector)
     builder.add_node("retry_copywriter", node_retry_copywriter)
     builder.add_node("fail_max_retries", node_fail_max_retries)
+    builder.add_node("human_approval", node_human_approval)
 
     # Happy path edges
     builder.add_edge(START, "trend_scout")
@@ -240,7 +267,7 @@ def build_graph(checkpointer=None):
             "retry_angle": "retry_angle_selector",
             "retry_copy": "retry_copywriter",
             "fail": "fail_max_retries",
-            "success": END,
+            "success": "human_approval",
         },
     )
 
@@ -248,21 +275,29 @@ def build_graph(checkpointer=None):
     builder.add_edge("retry_angle_selector", "platform_strategist")  # full redo
     builder.add_edge("retry_copywriter", "critics")                  # recheck
     builder.add_edge("fail_max_retries", END)
+    builder.add_edge("human_approval", END)
 
     return builder.compile(checkpointer=checkpointer)
 
 
 # Quick manual test — run this file directly
 #
-# Uses a REAL SQLite checkpointer this time, saved to
-# content_store/checkpoints.sqlite (per FOLDER_STRUCTURE.md). Every step
-# of the run gets persisted under a "thread_id" -- think of a thread_id
-# as a save-slot name. Run this file twice with the SAME thread_id and
-# LangGraph can resume/inspect that exact run instead of starting fresh.
+# Demonstrates the FULL pause-then-resume flow:
+# 1. graph.invoke() runs until it hits human_approval, then STOPS --
+#    it does not finish, it returns control back to us with the pack
+#    waiting for a decision.
+# 2. We simulate a human reviewing the pack and approving it.
+# 3. graph.invoke(Command(resume=...)) picks up EXACTLY where it left
+#    off and finishes -- proving the interrupt/resume mechanism works.
+#
+# This is real, reusable plumbing -- the Week 6 Streamlit dashboard
+# will call the exact same resume mechanism, just with a button click
+# instead of this hardcoded "approved: True".
 if __name__ == "__main__":
     import os
+    from langgraph.types import Command
 
-    os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")  # security: only allow known-safe types on checkpoint load
+    os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
 
     db_path = "content_store/checkpoints.sqlite"
     thread_id = "manual-test-run-1"
@@ -271,20 +306,31 @@ if __name__ == "__main__":
         graph = build_graph(checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}}
 
-        final_state = graph.invoke(MarketingState(), config=config)
+        result = graph.invoke(MarketingState(), config=config)
 
-        print("\n--- GRAPH RUN COMPLETE ---")
+        if "__interrupt__" in result:
+            pack = result["__interrupt__"][0].value
+            print("\n--- PAUSED FOR HUMAN APPROVAL ---")
+            print(f"Theme: {pack['theme']}")
+            print(f"Angle: {pack['angle']}")
+            print(f"Platforms drafted: {list(pack['drafts'].keys())}")
+
+            print("\n[simulating human review... approving]")
+            final_state = graph.invoke(Command(resume={"approved": True}), config=config)
+
+            print("\n--- GRAPH RUN COMPLETE (resumed after approval) ---")
+            print(f"Final approved status: {final_state.get('approved')}")
+        else:
+            # Graph ended without pausing -- either no strong theme,
+            # no angle, or it failed max retries. Not an error, just
+            # means human_approval was never reached this run.
+            final_state = result
+            print("\n--- GRAPH RUN COMPLETE (did not reach approval) ---")
+
         if final_state.get("chosen_theme"):
             print(f"Theme: {final_state['chosen_theme'].label}")
-        if final_state.get("angle"):
-            print(f"Angle: {final_state['angle'].take}")
-        if final_state.get("critiques"):
-            print("\nFinal critique summary:")
-            for key, c in final_state["critiques"].items():
-                print(f"  {key}: {'PASS' if c.passed else 'FAIL'} ({c.score})")
-        print(f"\nRetry counts: {final_state.get('retry_counts')}")
+        print(f"Retry counts: {final_state.get('retry_counts')}")
         if final_state.get("errors"):
             print(f"Errors: {final_state['errors']}")
 
         print(f"\n[checkpointer] Run saved under thread_id='{thread_id}' at {db_path}")
-        print("[checkpointer] Re-run this file to see the checkpoint history grow.")
