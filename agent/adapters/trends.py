@@ -26,8 +26,10 @@ Caveats (be aware, don't be surprised):
   (meaning >5000% growth) instead of a number -- handled explicitly.
 """
 
+import json
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 from pytrends.request import TrendReq
@@ -46,6 +48,14 @@ GEO = "IN"          # India
 TIMEFRAME = "now 7-d"
 REQUEST_DELAY_SECONDS = 2  # be polite between keyword requests
 
+# Safety net: if a LIVE fetch fails entirely (Google's frontend changed,
+# temporary block, etc.), fall back to the last successful fetch instead
+# of returning an empty list -- keeps signal quality consistent even on
+# a bad day. A cached result older than this is considered too stale to
+# trust and won't be used.
+CACHE_PATH = Path(__file__).parent.parent.parent / "content_store" / "trends_cache.json"
+CACHE_MAX_AGE_HOURS = 48
+
 # Rising queries containing these words are almost always noise -- word
 # games, crossword clues, and trivia, not genuine career-anxiety signal.
 # ("job interview" is a common crossword answer, which pollutes results.)
@@ -55,6 +65,39 @@ NOISE_TERMS = ["crossword", "wordle", "quiz", "trivia", "nyt "]
 def _is_noise(query: str) -> bool:
     query_lower = query.lower()
     return any(term in query_lower for term in NOISE_TERMS)
+
+
+def _save_cache(items: list[SignalItem]) -> None:
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+        "items": [item.model_dump() for item in items],
+    }
+    CACHE_PATH.write_text(json.dumps(data, indent=2))
+
+
+def _load_cache() -> list[SignalItem] | None:
+    """Returns cached items if a cache exists AND is fresh enough,
+    otherwise None (meaning: don't use it, it's too old to trust)."""
+    if not CACHE_PATH.exists():
+        return None
+
+    try:
+        data = json.loads(CACHE_PATH.read_text())
+        cached_at = datetime.fromisoformat(data["cached_at"])
+        age_hours = (datetime.now(timezone.utc) - cached_at).total_seconds() / 3600
+
+        if age_hours > CACHE_MAX_AGE_HOURS:
+            print(f"[trends] Cache exists but is {age_hours:.1f}h old "
+                  f"(max {CACHE_MAX_AGE_HOURS}h) -- too stale, not using it.")
+            return None
+
+        print(f"[trends] Using cached result from {age_hours:.1f}h ago.")
+        return [SignalItem(**item) for item in data["items"]]
+
+    except Exception as e:
+        print(f"[trends] Cache file exists but couldn't be read ({e}) -- ignoring it.")
+        return None
 
 
 def _score_from_value(value) -> float:
@@ -76,6 +119,11 @@ def fetch_trends_signal(keywords: list[str] | None = None) -> list[SignalItem]:
     """
     Returns a list of SignalItems built from RISING related-query data on
     Google Trends for each seed keyword, scoped to India.
+
+    If the live fetch fails completely (Google's frontend changed, a
+    temporary block, network issue) and returns nothing, falls back to
+    the last successful cached result (if one exists and isn't too old)
+    instead of returning an empty list.
     """
     keywords = keywords or SEED_KEYWORDS
     pytrends = TrendReq(hl="en-US", tz=330)  # tz=330 -> IST offset in minutes
@@ -120,6 +168,19 @@ def fetch_trends_signal(keywords: list[str] | None = None) -> list[SignalItem]:
 
         time.sleep(REQUEST_DELAY_SECONDS)
 
+    if items:
+        _save_cache(items)
+        return items
+
+    # Live fetch produced nothing at all (every keyword failed or was
+    # empty) -- fall back to the last known-good cached result rather
+    # than returning an empty list.
+    print("[trends] Live fetch returned zero items -- checking cache fallback...")
+    cached = _load_cache()
+    if cached:
+        return cached
+
+    print("[trends] No usable cache either -- returning empty list.")
     return items
 
 
